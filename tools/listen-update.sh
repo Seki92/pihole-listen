@@ -15,7 +15,8 @@
 #      einschalten und anschließend alle Listen sofort neu laden
 #   6. Wenn AUTO_UPDATE=1: AdGuard Home auf jedem Server aktualisieren, sobald
 #      eine neue Version da ist – nacheinander, und erst zum nächsten Server,
-#      wenn der vorige mit der neuen Version wieder läuft
+#      wenn der vorige mit der neuen Version wieder läuft. Dazu gehören auch
+#      die Server in NUR_UPDATE_SERVER (dort werden keine Listen angefasst).
 #
 # Aufruf:
 #   listen-update.sh                  normaler Lauf (täglich per Cron)
@@ -86,6 +87,7 @@ declare -p BLOCK_DATEIEN   >/dev/null 2>&1 || abbruch "BLOCK_DATEIEN fehlt in $K
 declare -p ERLAUBT_DATEIEN >/dev/null 2>&1 || ERLAUBT_DATEIEN=()
 declare -p EXTRA_BLOCKLISTEN >/dev/null 2>&1 || EXTRA_BLOCKLISTEN=()
 declare -p SERVER          >/dev/null 2>&1 || SERVER=()
+declare -p NUR_UPDATE_SERVER >/dev/null 2>&1 || NUR_UPDATE_SERVER=()
 
 # ---------- Abhängigkeiten ----------------------------------------------------
 benoetigt=(awk sort grep)
@@ -367,7 +369,7 @@ server_abgleichen() {
 adguard_updates() {
   local eintrag status info aktuell neu kann aus version t zurueck
   log "Prüfe AdGuard-Home-Updates"
-  for eintrag in "${SERVER[@]}"; do
+  for eintrag in "${SERVER[@]}" "${NUR_UPDATE_SERVER[@]}"; do
     IFS='|' read -r AGH_URL AGH_USER AGH_PASS <<<"$eintrag"
     AGH_URL="${AGH_URL%/}"
     if ! status=$(agh GET status 2>/dev/null) || ! aktuell=$(jq -er '.version' <<<"$status" 2>/dev/null); then

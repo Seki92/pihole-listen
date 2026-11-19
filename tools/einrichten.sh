@@ -18,7 +18,7 @@
 # Listen auf GitHub selbst auf.
 # =============================================================================
 set -euo pipefail
-weiter="" haupt="" gleich="" benutzer="" pw="" trotzdem="" upd="j"
+weiter="" haupt="" gleich="" benutzer="" pw="" trotzdem="" upd="j" nu="" gleich2="" b2="" pw2=""
 
 QUELLE="${QUELLE:-https://raw.githubusercontent.com/Seki92/pihole-listen/master}"
 BIN="${BIN:-/usr/local/bin/listen-update.sh}"
@@ -90,6 +90,24 @@ if (( schreiben )); then
   fi
   unset pw
   frage upd "AdGuard Home automatisch aktualisieren, wenn eine neue Version da ist?" "j"
+  nur_update=()
+  if ja "$upd" && ! ja "$haupt"; then
+    frage nu "Auch adguard.$DOMAIN und adguardbackup.$DOMAIN aktualisieren (nur Software, keine Listen)?" "j"
+    if ja "$nu"; then
+      frage gleich2 "Gleicher Benutzer und dasselbe Passwort wie eben?" "j"
+      if ja "$gleich2" && ja "$gleich"; then
+        pw2="${eintraege[0]#*|}"; pw2="${pw2#*|}"   # "Adresse|Benutzer|Passwort" → Passwort
+        nur_update=("https://adguardbackup.$DOMAIN|$benutzer|$pw2" "https://adguard.$DOMAIN|$benutzer|$pw2")
+      else
+        for u in "https://adguardbackup.$DOMAIN" "https://adguard.$DOMAIN"; do
+          frage b2 "Benutzer für $u" "$benutzer"
+          frage_geheim pw2 "Passwort für $u"
+          nur_update+=("$u|$b2|$pw2")
+        done
+      fi
+      unset pw2
+    fi
+  fi
 
   ( umask 077
     {
@@ -109,6 +127,10 @@ if (( schreiben )); then
       echo ")"
       echo "LOCKDATEI=/run/listen-update.lock"
       if ja "$upd"; then echo "AUTO_UPDATE=1"; else echo "AUTO_UPDATE=0"; fi
+      echo "# Nur Software-Updates, keine Listen (Backup zuerst, dann Hauptserver)"
+      echo "NUR_UPDATE_SERVER=("
+      for e in "${nur_update[@]}"; do printf '  %q\n' "$e"; done
+      echo ")"
     } > "$KONF"
   )
   chmod 600 "$KONF"
