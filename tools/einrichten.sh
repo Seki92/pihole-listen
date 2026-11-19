@@ -13,9 +13,12 @@
 #      → /etc/listen-update.conf (nur für root lesbar)
 #   4. Probelauf: zeigt, was auf jedem Server passieren würde
 #   5. Echter Lauf + täglicher Cron-Job (/etc/cron.d/listen-update)
+#
+# Danach optional: tools/github-pflege.sh – dann räumt der Server auch die
+# Listen auf GitHub selbst auf.
 # =============================================================================
 set -euo pipefail
-weiter="" haupt="" gleich="" benutzer="" pw="" trotzdem=""
+weiter="" haupt="" gleich="" benutzer="" pw="" trotzdem="" upd="j"
 
 QUELLE="${QUELLE:-https://raw.githubusercontent.com/Seki92/pihole-listen/master}"
 BIN="${BIN:-/usr/local/bin/listen-update.sh}"
@@ -86,6 +89,7 @@ if (( schreiben )); then
     done
   fi
   unset pw
+  frage upd "AdGuard Home automatisch aktualisieren, wenn eine neue Version da ist?" "j"
 
   ( umask 077
     {
@@ -104,6 +108,7 @@ if (( schreiben )); then
       for e in "${eintraege[@]}"; do printf '  %q\n' "$e"; done
       echo ")"
       echo "LOCKDATEI=/run/listen-update.lock"
+      if ja "$upd"; then echo "AUTO_UPDATE=1"; else echo "AUTO_UPDATE=0"; fi
     } > "$KONF"
   )
   chmod 600 "$KONF"
@@ -124,12 +129,30 @@ fi
 
 echo "== 5/5 Listen auf allen Servern einrichten und täglichen Abgleich aktivieren"
 LISTEN_UPDATE_CONF="$KONF" "$BIN" --nur-server || true
-cat > "$CRON" <<EOF
-# Gleicht täglich die Listen-Abos aller AdGuard-Server ab (angelegt von einrichten.sh)
+if grep -q '^REPO_URL=' "$KONF"; then
+  # GitHub-Pflege ist schon eingerichtet (github-pflege.sh) → vollen Lauf behalten
+  cat > "$CRON" <<EOF
+# listen-update (angelegt von einrichten.sh)
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+47 4 * * *  root  LISTEN_UPDATE_CONF=$KONF $BIN >> /var/log/listen-update.log 2>&1
+17 3 1 * *  root  LISTEN_UPDATE_CONF=$KONF $BIN --nur-listen --tote-pruefen >> /var/log/listen-update.log 2>&1
+EOF
+else
+  cat > "$CRON" <<EOF
+# listen-update (angelegt von einrichten.sh): gleicht täglich alle AdGuard-Server ab
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 47 4 * * *  root  LISTEN_UPDATE_CONF=$KONF $BIN --nur-server >> /var/log/listen-update.log 2>&1
 EOF
+fi
 chmod 644 "$CRON"
+if [[ -d /etc/logrotate.d ]]; then
+  printf '/var/log/listen-update.log {\n  monthly\n  rotate 6\n  compress\n  missingok\n  notifempty\n}\n' > /etc/logrotate.d/listen-update
+fi
 echo "   Cron-Job: $CRON (täglich 04:47, Protokoll: /var/log/listen-update.log)"
 echo
-echo "Fertig. Die Listen selbst pflegt ab jetzt die GitHub-Action im Repo."
+if grep -q '^REPO_URL=' "$KONF"; then
+  echo "Fertig."
+else
+  echo "Fertig. Soll der Server auch die Listen auf GitHub aufräumen, danach noch:"
+  echo "  bash <(curl -fsSL $QUELLE/tools/github-pflege.sh)"
+fi

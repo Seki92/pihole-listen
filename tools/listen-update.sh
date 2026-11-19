@@ -13,6 +13,9 @@
 #   4. Wenn sich etwas geändert hat: commit + push nach GitHub
 #   5. Auf jedem Server: fehlende Listen-Abos anlegen, abgeschaltete wieder
 #      einschalten und anschließend alle Listen sofort neu laden
+#   6. Wenn AUTO_UPDATE=1: AdGuard Home auf jedem Server aktualisieren, sobald
+#      eine neue Version da ist – nacheinander, und erst zum nächsten Server,
+#      wenn der vorige mit der neuen Version wieder läuft
 #
 # Aufruf:
 #   listen-update.sh                  normaler Lauf (täglich per Cron)
@@ -23,6 +26,7 @@
 #                                     Listen pflegt die GitHub-Action im Repo)
 #   listen-update.sh --nur-listen     nur Listen bereinigen/pushen, Server nicht anfassen
 #                                     (so läuft es in der GitHub-Action)
+#   listen-update.sh --ohne-update    AdGuard-Updates bei diesem Lauf auslassen
 #   listen-update.sh --trocken        alles prüfen und anzeigen, aber nichts
 #                                     pushen und an den Servern nichts ändern
 #
@@ -40,14 +44,15 @@ export LC_ALL=C
 KONFIG="${LISTEN_UPDATE_CONF:-/etc/listen-update.conf}"
 
 # ---------- Optionen ----------------------------------------------------------
-TOTE_PRUEFEN=0; TROCKEN=0; LISTEN=1; SERVER_SYNC=1
+TOTE_PRUEFEN=0; TROCKEN=0; LISTEN=1; SERVER_SYNC=1; OHNE_UPDATE=0
 for arg in "$@"; do
   case "$arg" in
     --tote-pruefen) TOTE_PRUEFEN=1 ;;
     --trocken)      TROCKEN=1 ;;
     --nur-server)   LISTEN=0 ;;
     --nur-listen)   SERVER_SYNC=0 ;;
-    -h|--help)      sed -n '2,33p' "$0"; exit 0 ;;
+    --ohne-update)  OHNE_UPDATE=1 ;;
+    -h|--help)      sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "Unbekannte Option: $arg (siehe --help)" >&2; exit 2 ;;
   esac
 done
@@ -73,6 +78,8 @@ fi
 : "${PARALLEL:=32}"
 : "${WARTEN_NACH_PUSH:=300}"
 : "${MAX_TOTE_PROZENT:=70}"
+: "${AUTO_UPDATE:=0}"
+: "${UPDATE_WARTEZEIT:=300}"
 : "${GIT_NAME:=listen-update}"
 : "${GIT_MAIL:=listen-update@localhost}"
 declare -p BLOCK_DATEIEN   >/dev/null 2>&1 || abbruch "BLOCK_DATEIEN fehlt in $KONFIG"
@@ -352,6 +359,58 @@ server_abgleichen() {
 }
 
 # =============================================================================
+# AdGuard Home aktualisieren
+# =============================================================================
+# Nutzt die eingebaute Update-Funktion von AdGuard Home (wie der Button in der
+# Oberfläche). Die Server werden nacheinander aktualisiert; kommt einer nach dem
+# Update nicht mit der neuen Version zurück, bleiben alle weiteren unangetastet.
+adguard_updates() {
+  local eintrag status info aktuell neu kann aus version t zurueck
+  log "Prüfe AdGuard-Home-Updates"
+  for eintrag in "${SERVER[@]}"; do
+    IFS='|' read -r AGH_URL AGH_USER AGH_PASS <<<"$eintrag"
+    AGH_URL="${AGH_URL%/}"
+    if ! status=$(agh GET status 2>/dev/null) || ! aktuell=$(jq -er '.version' <<<"$status" 2>/dev/null); then
+      warn "  $AGH_URL: Version nicht abrufbar – übersprungen"; continue
+    fi
+    if ! info=$(agh POST version.json '{"recheck_now":true}' 2>/dev/null) || ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"$info"; then
+      warn "  $AGH_URL: Update-Prüfung fehlgeschlagen (AdGuard-Update-Server nicht erreichbar?)"; continue
+    fi
+    neu=$(jq -r '.new_version // ""' <<<"$info")
+    kann=$(jq -r '.can_autoupdate // false' <<<"$info")
+    aus=$(jq -r '.disabled // false' <<<"$info")
+    if [[ "$aus" == true ]]; then
+      log "  $AGH_URL: $aktuell (Update-Prüfung ist in AdGuard abgeschaltet)"; continue
+    fi
+    if [[ -z "$neu" || "$neu" == "$aktuell" ]]; then
+      log "  $AGH_URL: $aktuell ist aktuell"; continue
+    fi
+    if [[ "$kann" != true ]]; then
+      warn "  $AGH_URL: $neu verfügbar, kann aber nicht automatisch installiert werden (Docker/Snap/Paketverwaltung?)"; continue
+    fi
+    if (( TROCKEN )); then
+      log "  [trocken] $AGH_URL: würde $aktuell → $neu aktualisieren"; continue
+    fi
+    log "  $AGH_URL: aktualisiere $aktuell → $neu"
+    if ! agh POST update '{}' >/dev/null 2>&1; then
+      warn "  $AGH_URL: Update ließ sich nicht starten – weitere Updates gestoppt"
+      SERVER_FEHLER=$((SERVER_FEHLER + 1)); return
+    fi
+    zurueck=0
+    for (( t = 0; t < UPDATE_WARTEZEIT; t += 5 )); do
+      sleep 5
+      version=$(agh GET status 2>/dev/null | jq -r '.version // ""' 2>/dev/null) || version=""
+      if [[ "$version" == "$neu" ]]; then zurueck=1; break; fi
+    done
+    if (( ! zurueck )); then
+      warn "  $AGH_URL: nach ${UPDATE_WARTEZEIT}s nicht mit $neu zurück – weitere Updates gestoppt, bitte prüfen!"
+      SERVER_FEHLER=$((SERVER_FEHLER + 1)); return
+    fi
+    log "  $AGH_URL: läuft jetzt mit $neu"
+  done
+}
+
+# =============================================================================
 # Hauptteil
 # =============================================================================
 log "=== listen-update startet$( (( TROCKEN )) && echo ' (trocken)') ==="
@@ -367,6 +426,7 @@ if (( SERVER_SYNC )); then
     sleep "$WARTEN_NACH_PUSH"
   fi
   server_abgleichen
+  if (( AUTO_UPDATE && ! OHNE_UPDATE )); then adguard_updates; fi
   if (( SERVER_FEHLER )); then log "=== Ende mit Fehlern ==="; exit 1; fi
 fi
 log "=== fertig ==="
