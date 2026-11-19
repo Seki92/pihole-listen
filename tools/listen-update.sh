@@ -28,6 +28,8 @@
 #   listen-update.sh --nur-listen     nur Listen bereinigen/pushen, Server nicht anfassen
 #                                     (so läuft es in der GitHub-Action)
 #   listen-update.sh --ohne-update    AdGuard-Updates bei diesem Lauf auslassen
+#   listen-update.sh --cache-leeren   zum Schluss den DNS-Cache aller Server leeren
+#                                     (auch NUR_UPDATE_SERVER), damit Änderungen sofort greifen
 #   listen-update.sh --trocken        alles prüfen und anzeigen, aber nichts
 #                                     pushen und an den Servern nichts ändern
 #
@@ -45,7 +47,7 @@ export LC_ALL=C
 KONFIG="${LISTEN_UPDATE_CONF:-/etc/listen-update.conf}"
 
 # ---------- Optionen ----------------------------------------------------------
-TOTE_PRUEFEN=0; TROCKEN=0; LISTEN=1; SERVER_SYNC=1; OHNE_UPDATE=0
+TOTE_PRUEFEN=0; TROCKEN=0; LISTEN=1; SERVER_SYNC=1; OHNE_UPDATE=0; CACHE_LEEREN=0
 for arg in "$@"; do
   case "$arg" in
     --tote-pruefen) TOTE_PRUEFEN=1 ;;
@@ -53,6 +55,7 @@ for arg in "$@"; do
     --nur-server)   LISTEN=0 ;;
     --nur-listen)   SERVER_SYNC=0 ;;
     --ohne-update)  OHNE_UPDATE=1 ;;
+    --cache-leeren) CACHE_LEEREN=1 ;;
     -h|--help)      sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "Unbekannte Option: $arg (siehe --help)" >&2; exit 2 ;;
   esac
@@ -88,6 +91,7 @@ declare -p ERLAUBT_DATEIEN >/dev/null 2>&1 || ERLAUBT_DATEIEN=()
 declare -p EXTRA_BLOCKLISTEN >/dev/null 2>&1 || EXTRA_BLOCKLISTEN=()
 declare -p SERVER          >/dev/null 2>&1 || SERVER=()
 declare -p NUR_UPDATE_SERVER >/dev/null 2>&1 || NUR_UPDATE_SERVER=()
+declare -p AUS_LISTEN      >/dev/null 2>&1 || AUS_LISTEN=()   # URLs, die auf allen Servern aus sein müssen
 
 # ---------- Abhängigkeiten ----------------------------------------------------
 benoetigt=(awk sort grep)
@@ -335,16 +339,34 @@ server_abgleichen() {
     for datei in "${ERLAUBT_DATEIEN[@]}"; do
       abo_sicherstellen "$status" "Seki92 $datei" "$RAW_BASIS/$datei" true "$datei" || abo_fehler=1
     done
+    # Listen, die auf keinem Server aktiv sein dürfen (Block- wie Erlaubt-Listen)
+    local aus_url aus_feld aus_treffer aus_name
+    for aus_url in "${AUS_LISTEN[@]}"; do
+      for aus_feld in filters whitelist_filters; do
+        aus_treffer=$(jq -r --arg u "$aus_url" --arg f "$aus_feld" \
+          '[(.[$f] // [])[] | select(.url == $u and .enabled)] | if length == 0 then "" else .[0].name end' <<<"$status") || aus_treffer=""
+        [[ -z "$aus_treffer" ]] && continue
+        aus_name="$aus_treffer"
+        log "    schalte aus: $aus_name"
+        (( TROCKEN )) && continue
+        if ! agh POST filtering/set_url "$(jq -cn --arg n "$aus_name" --arg u "$aus_url" \
+              --argjson w "$([[ $aus_feld == whitelist_filters ]] && echo true || echo false)" \
+              '{url:$u, whitelist:$w, data:{name:$n, url:$u, enabled:false}}')" >/dev/null; then
+          abo_fehler=1
+        fi
+      done
+    done
+
     if (( abo_fehler )); then
       warn "  Nicht alle Listen-Abos auf $AGH_URL konnten angepasst werden"
       SERVER_FEHLER=$((SERVER_FEHLER + 1))
     fi
 
     # Listen, die nicht in der Konfiguration stehen, nur melden – nie löschen
-    jq -r --argjson soll "$soll" '
+    jq -r --argjson soll "$soll" --argjson aus "$(printf '%s\n' "${AUS_LISTEN[@]}" | jq -R . | jq -cs .)" '
       (.filters // [])[] | select(.enabled)
       | select((.url | ascii_downcase | contains("seki92/pihole-listen")) | not)
-      | select(.url as $u | ($soll | any(.[]; . == $u)) | not)
+      | select(.url as $u | ($soll + $aus | any(.[]; . == $u)) | not)
       | "  zusätzlich aktiv (bleibt): \(.name)"' <<<"$status" | while IFS= read -r z; do log "$z"; done || true
 
     if (( TROCKEN )); then
@@ -358,6 +380,20 @@ server_abgleichen() {
     ok=$((ok + 1))
   done
   log "Server fertig: $ok von ${#SERVER[@]} abgeglichen, $SERVER_FEHLER Fehler"
+}
+
+# Leert den DNS-Cache aller Server (sonst liefern sie alte, ungeblockte Antworten
+# noch eine Weile weiter – besonders mit "optimistischem Caching").
+cache_leeren() {
+  local eintrag
+  log "Leere DNS-Cache"
+  for eintrag in "${SERVER[@]}" "${NUR_UPDATE_SERVER[@]}"; do
+    IFS='|' read -r AGH_URL AGH_USER AGH_PASS <<<"$eintrag"
+    AGH_URL="${AGH_URL%/}"
+    if (( TROCKEN )); then log "  [trocken] $AGH_URL"; continue; fi
+    if agh POST cache_clear '{}' >/dev/null 2>&1; then log "  $AGH_URL: geleert"
+    else warn "  $AGH_URL: Cache ließ sich nicht leeren"; fi
+  done
 }
 
 # =============================================================================
@@ -429,6 +465,7 @@ if (( SERVER_SYNC )); then
   fi
   server_abgleichen
   if (( AUTO_UPDATE && ! OHNE_UPDATE )); then adguard_updates; fi
+  if (( CACHE_LEEREN )); then cache_leeren; fi
   if (( SERVER_FEHLER )); then log "=== Ende mit Fehlern ==="; exit 1; fi
 fi
 log "=== fertig ==="
