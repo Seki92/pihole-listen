@@ -1,0 +1,44 @@
+name: Listen bereinigen
+
+# Räumt die Listen täglich auf (Duplikate, ungültige Einträge, Formatfehler) und
+# committet das Ergebnis. Am 1. jedes Monats werden zusätzlich Domains entfernt,
+# die es nicht mehr gibt. Die DNS-Server holen sich die Listen danach selbst.
+on:
+  schedule:
+    - cron: '17 2 * * *'   # täglich 02:17 UTC
+    - cron: '43 0 1 * *'   # monatlich: zusätzlich tote Domains entfernen
+  workflow_dispatch:
+    inputs:
+      tote_pruefen:
+        description: 'Tote Domains entfernen (dauert länger)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: listen-bereinigen
+  cancel-in-progress: false
+
+jobs:
+  bereinigen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: dig bereitstellen
+        run: command -v dig >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq dnsutils; }
+
+      - name: Listen bereinigen
+        env:
+          LISTEN_UPDATE_CONF: ${{ github.workspace }}/tools/listen-update.repo.conf
+          ZEITPLAN: ${{ github.event.schedule }}
+          TOTE_PRUEFEN: ${{ inputs.tote_pruefen }}
+        run: |
+          optionen=(--nur-listen)
+          if [ "$ZEITPLAN" = "43 0 1 * *" ] || [ "$TOTE_PRUEFEN" = "true" ]; then
+            optionen+=(--tote-pruefen)
+          fi
+          bash tools/listen-update.sh "${optionen[@]}"
