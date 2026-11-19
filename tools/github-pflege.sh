@@ -120,6 +120,9 @@ erg() {  # erg NAME WERT – Zeile ergänzen, wenn die Variable noch fehlt
   grep -q "^$1=" "$KONF" || printf '%s=%s\n' "$1" "$2" >> "$KONF"
 }
 grep -q '^# --- GitHub-Pflege' "$KONF" || printf '\n# --- GitHub-Pflege (von github-pflege.sh) ---\n' >> "$KONF"
+# REPO_URL immer auf den eigenen SSH-Namen setzen (eine ältere Zeile mit
+# git@github.com würde sonst den falschen Schlüssel benutzen)
+sed -i '/^REPO_URL=/d' "$KONF"
 erg REPO_URL "\"git@$ALIAS:$REPO.git\""
 erg REPO_DIR '"/opt/pihole-listen"'
 erg BRANCH '"master"'
