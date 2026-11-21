@@ -64,11 +64,14 @@ hardware_zeigen() {
   sockel=$(lscpu | sed -n 's/^Socket(s):[[:space:]]*//p' | head -1)
   numa=$(lscpu | sed -n 's/^NUMA node(s):[[:space:]]*//p' | head -1)
   ram=$(awk '/^MemTotal:/ {printf "%d", $2 / 1024 / 1024}' /proc/meminfo)
-  grep -qw avx512f /proc/cpuinfo && avx="ja" || avx="nein"
+  if grep -qw avx512f /proc/cpuinfo; then avx="AVX-512 (schnell)"
+  elif grep -qw avx2 /proc/cpuinfo; then avx="AVX2 (gut)"
+  elif grep -qw avx /proc/cpuinfo; then avx="nur AVX (alt, deutlich langsamer)"
+  else avx="kein AVX (zu alt für Ollama)"; fi
   info "CPU:       ${cpu:-unbekannt}"
   info "Threads:   $kerne   Sockel: ${sockel:-?}   NUMA-Knoten: ${numa:-?}"
   info "RAM:       ${ram} GB"
-  info "AVX-512:   $avx"
+  info "Befehle:   $avx"
   info "Frei auf /: $(df -BG --output=avail / | tail -1 | tr -d ' ')"
   (( ram >= 32 )) || abbruch "Weniger als 32 GB RAM – dafür ist dieses Skript nicht gedacht."
 }
@@ -174,9 +177,12 @@ modell_laden() {
 
 geschwindigkeit_messen() {
   local antwort tps pps text
-  info "Testfrage an $MODELL (ohne Nachdenk-Modus) ..."
-  antwort=$(curl -fsS -m 900 "$API/api/generate" -d "$(jq -cn --arg m "$MODELL" \
-    '{model: $m, prompt: "Erkläre in drei kurzen Sätzen, was ein DNS-Server macht.", stream: false, think: false}')") \
+  local text_lang
+  # Rund 400 Wörter Eingabe, damit auch die Lesegeschwindigkeit aussagekräftig ist
+  text_lang=$(printf '%.0s Ein DNS-Server übersetzt Namen wie example.com in IP-Adressen. Fragt ein Gerät nach einer Adresse, schaut der Server zuerst in seinem Zwischenspeicher nach. Kennt er die Antwort nicht, fragt er andere Server, bis er die zuständige Stelle gefunden hat. Werbeblocker wie AdGuard beantworten Anfragen nach bekannten Werbe- und Schadseiten absichtlich mit einer leeren Antwort, sodass diese Inhalte gar nicht erst geladen werden.' {1..6})
+  info "Testaufgabe an $MODELL (ohne Nachdenk-Modus), kann auf alten CPUs einige Minuten dauern ..."
+  antwort=$(curl -fsS -m 1800 "$API/api/generate" -d "$(jq -cn --arg m "$MODELL" --arg t "$text_lang" \
+    '{model: $m, prompt: ("Fasse diesen Text in drei kurzen Sätzen zusammen:\n\n" + $t), stream: false, think: false}')") \
     || { warn "Testfrage fehlgeschlagen. Prüfen mit: journalctl -u ollama -n 50"; return 0; }
   text=$(jq -r '.response' <<<"$antwort")
   tps=$(jq -r 'if .eval_duration > 0 then (.eval_count / (.eval_duration / 1e9) * 10 | floor / 10) else 0 end' <<<"$antwort")
