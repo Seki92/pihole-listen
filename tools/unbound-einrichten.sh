@@ -232,16 +232,26 @@ dnssec_anker() {
   fi
 }
 
-# Die Ankerdatei entsteht sonst erst beim ersten Start des Dienstes;
-# unbound-checkconf bricht ohne sie ab
+# DNSSEC-Schlüssel der Root-Zone bereitstellen. Er kommt aus dem Paket
+# dns-root-data, das apt nur als Empfehlung mitinstalliert – auf vielen
+# Servern sind Empfehlungen abgeschaltet. Ohne ihn startet Unbound nicht.
 anker_datei_anlegen() {
-  local key=/var/lib/unbound/root.key
+  local key=/var/lib/unbound/root.key quelle=/usr/share/dns/root.key
   [[ -s $key ]] && return 0
+  if [[ ! -s $quelle ]]; then
+    info "Installiere: dns-root-data"
+    apt-get update -q >/dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q dns-root-data >/dev/null || true
+  fi
   install -d -o unbound -g unbound /var/lib/unbound 2>/dev/null || mkdir -p /var/lib/unbound
-  [[ -x /usr/libexec/unbound-helper ]] && { /usr/libexec/unbound-helper root_trust_anchor_update >/dev/null 2>&1 || true; }
-  [[ -s $key ]] || unbound-anchor -a "$key" >/dev/null 2>&1 || true
-  [[ -s $key ]] && chown unbound:unbound "$key" 2>/dev/null
-  return 0
+  if [[ -s $quelle ]]; then
+    cp "$quelle" "$key"
+  elif command -v unbound-anchor >/dev/null; then
+    unbound-anchor -a "$key" >/dev/null 2>&1 || true
+  fi
+  [[ -s $key ]] || { rm -f "$UNBOUND_CONF"; abbruch "DNSSEC-Schlüssel fehlt: dns-root-data ließ sich nicht installieren (apt install dns-root-data)"; }
+  chown unbound:unbound "$key" 2>/dev/null || true
+  info "DNSSEC-Schlüssel der Root-Zone bereitgestellt."
 }
 
 vorpruefen() {
@@ -345,7 +355,12 @@ dns_server_einrichten() {
   pakete curl:curl jq:jq
   anmelden "Welcher DNS-Server ist das? Nummer (z. B. 3) oder Adresse"
   if [[ -z ${AGH_URL_VORGEGEBEN:-} && -z $push_url ]]; then
-    frage push_url "Uptime-Kuma-Push-URL für diesen Server (Enter = ohne)"
+    while :; do
+      frage push_url "Uptime-Kuma-Push-URL für diesen Server (Enter = ohne)"
+      [[ -z $push_url || $push_url == http*://*/api/push/* ]] && break
+      info "Das ist keine Push-URL. Du findest sie in Uptime Kuma beim Push-Monitor,"
+      info "sie sieht so aus: https://status.$DOMAIN/api/push/AbC123xyz?status=up&msg=OK&ping="
+    done
   fi
 
   schritt "2/5 Unbound installieren"
