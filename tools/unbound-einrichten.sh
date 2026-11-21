@@ -254,6 +254,22 @@ anker_datei_anlegen() {
   info "DNSSEC-Schlüssel der Root-Zone bereitgestellt."
 }
 
+# Das Unbound-Paket trägt über unbound-resolvconf "nameserver 127.0.0.1" in
+# /etc/resolv.conf ein – ohne Port. Lauscht AdGuard nicht auf 127.0.0.1:53, kann
+# der Server danach keine Namen mehr auflösen (auch apt und curl nicht).
+# Deshalb wird der Helfer vor der Installation gesperrt und ein schon
+# vorhandener Eintrag entfernt.
+resolvconf_raushalten() {
+  systemctl stop unbound-resolvconf.service >/dev/null 2>&1 || true
+  systemctl mask unbound-resolvconf.service >/dev/null 2>&1 || true
+  if command -v resolvconf >/dev/null; then resolvconf -d lo.unbound >/dev/null 2>&1 || true; fi
+  if [[ -f /etc/resolvconf.conf ]] && grep -q '^unbound_conf=' /etc/resolvconf.conf; then
+    sed -Ei 's/^unbound_conf=/#unbound_conf=/' /etc/resolvconf.conf
+    rm -f /etc/unbound/unbound.conf.d/resolvconf_resolvers.conf
+  fi
+  return 0
+}
+
 vorpruefen() {
   local belegt fremd
   belegt=$( { ss -Hlnup 'sport = :5335'; ss -Hlntp 'sport = :5335'; } 2>/dev/null ) || true
@@ -277,15 +293,6 @@ unbound_installieren() {
   dnssec_anker
   anker_datei_anlegen
   unbound-checkconf >/dev/null || { rm -f "$UNBOUND_CONF"; abbruch "Unbound-Konfiguration fehlerhaft (unbound-checkconf)"; }
-
-  # Unbound soll nicht in /etc/resolv.conf eingreifen (Debian/Ubuntu)
-  if systemctl list-unit-files unbound-resolvconf.service >/dev/null 2>&1; then
-    systemctl disable --now unbound-resolvconf.service >/dev/null 2>&1 || true
-  fi
-  if [[ -f /etc/resolvconf.conf ]] && grep -q '^unbound_conf=' /etc/resolvconf.conf; then
-    sed -Ei 's/^unbound_conf=/#unbound_conf=/' /etc/resolvconf.conf
-    rm -f /etc/unbound/unbound.conf.d/resolvconf_resolvers.conf
-  fi
 
   # Bei Absturz nach 5 Sekunden neu starten, ohne Begrenzung der Versuche
   mkdir -p "$(dirname "$SYSTEMD_DROPIN")"
@@ -352,6 +359,7 @@ dns_server_einrichten() {
   local spezial allgemein neu_up neu_fb push_url=${KUMA_PUSH_URL:-}
 
   schritt "1/5 Anmeldung bei AdGuard auf diesem Server"
+  resolvconf_raushalten
   pakete curl:curl jq:jq
   anmelden "Welcher DNS-Server ist das? Nummer (z. B. 3) oder Adresse"
   if [[ -z ${AGH_URL_VORGEGEBEN:-} && -z $push_url ]]; then
